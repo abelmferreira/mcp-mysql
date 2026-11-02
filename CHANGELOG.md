@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.1] - 2026-11-02
+
+### Fixed
+- Docker Hub publish workflow read `DOCKERHUB_USERNAME` as a secret; it is a repository variable.
+
+### Changed
+- First release built and published by the pipeline (npm Trusted Publishing with provenance, and the
+  multi-arch Docker image). 1.0.0 was published manually.
+
 ## [1.0.0] - 2026-11-02
 
 First release, published as `@abelmferreira/mcp-mysql` (npm) and

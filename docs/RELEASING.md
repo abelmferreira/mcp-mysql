@@ -103,7 +103,8 @@ workflow can publish. From then on, `git push --follow-tags` releases (with prov
    - scope **Read & Write** is enough to push;
    - scope **Read, Write, Delete** is required only if you enable the optional
      "Update Docker Hub description" step in `publish-docker.yml`.
-4. GitHub secrets: `DOCKERHUB_USERNAME` = `abelmferreira`, `DOCKERHUB_TOKEN` = the token.
+4. GitHub *Settings -> Secrets and variables -> Actions*: a **variable** (not a secret)
+   `DOCKERHUB_USERNAME` = `abelmferreira`, and a **secret** `DOCKERHUB_TOKEN` = the token.
 
 ### 4. (Optional) GitHub environment `npm`
 
@@ -188,7 +189,7 @@ claude mcp add mysql -- docker run -i --rm --env-file /abs/path/.env abelmferrei
 | `Error verifying sigstore provenance bundle` / provenance error | Repo must be public and the job needs `id-token: write` (already set). Publishing from a fork or a private repo fails provenance. |
 | "Tag vX does not match package.json version" | Tag created by hand without bumping. Delete the tag (`git tag -d vX && git push origin :refs/tags/vX`), use `npm version`. |
 | `npm ci` fails: lockfile out of sync | Run `npm install` locally, commit `package-lock.json`. |
-| Docker `unauthorized: incorrect username or password` | Wrong `DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`, or the token expired. |
+| Docker `unauthorized: incorrect username or password` | Wrong `DOCKERHUB_USERNAME` (it is a repository *variable*, `vars.`, not a secret) or `DOCKERHUB_TOKEN`, or the token expired. |
 | Docker `denied: requested access to the resource is denied` | Token scope is read-only, or the repository `abelmferreira/mcp-mysql` does not exist / belongs to another namespace. |
 | Docker Hub description step: `403 Forbidden` | Token needs "Read, Write, Delete" scope. |
 | arm64 build very slow | Expected: arm64 is emulated with QEMU. The gha cache makes later builds faster. |
