@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_call: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # `npm ci` also runs the "prepare" script (tsc build).
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # Build first: the end-to-end shutdown test runs against build/index.js.
+      - name: Build
+        run: npm run build
+
+      - name: Tests
+        run: npm test
+
+      - name: Check CLI entry point
+        run: |
+          head -n1 build/index.js | grep -q '^#!/usr/bin/env node' \
+            || { echo "::error::build/index.js is missing the node shebang"; exit 1; }
+
+      # Load the compiled entry point under plain Node (no vitest interop):
+      # it must reach config validation and exit with a config error.
+      - name: Smoke test compiled entry point
+        run: |
+          if env -u READONLY node build/index.js < /dev/null 2> err.txt; then
+            echo "::error::server started without READONLY"; exit 1
+          fi
+          cat err.txt
+          grep -q 'Configuration error' err.txt
+
+      # Make sure the published tarball only ships build/, README, LICENSE
+      # (package.json is always included by npm).
+      - name: Check package contents
+        run: |
+          npm pack --dry-run --json > pack.json
+          node -e '
+            const files = require("./pack.json")[0].files.map(f => f.path);
+            const allowed = /^(build\/|README\.md$|LICENSE$|package\.json$)/;
+            const bad = files.filter(f => !allowed.test(f));
+            console.log(files.join("\n"));
+            if (bad.length) {
+              console.error("::error::Unexpected files in package: " + bad.join(", "));
+              process.exit(1);
+            }
+            if (!files.includes("build/index.js")) {
+              console.error("::error::build/index.js missing from package");
+              process.exit(1);
+            }
+          '
+
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Runs the unit tests inside the image build (stage "test").
+      - name: Build test stage
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: test
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          push: false
+          load: true
+          tags: mcp-mysql:ci
+          cache-from: type=gha
+
+      # Without READONLY the server must exit with a config error. Asserting on
+      # the message also catches module-loading crashes (e.g. ESM/CJS imports)
+      # that unit tests running under vitest do not see.
+      - name: Smoke test (missing READONLY must fail with a config error)
+        run: |
+          if docker run --rm -i mcp-mysql:ci < /dev/null 2> err.txt; then
+            echo "::error::server started without READONLY"; exit 1
+          fi
+          cat err.txt
+          grep -q 'Configuration error' err.txt
+
+      - name: Smoke test (image runs as non-root)
+        run: test "$(docker run --rm --entrypoint id mcp-mysql:ci -u)" = "1000"

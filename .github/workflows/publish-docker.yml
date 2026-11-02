@@ -1,0 +1,126 @@
+name: Publish Docker
+
+# Tagging policy:
+#   - push to main     -> :edge, :sha-<short>   (moving development build)
+#   - tag vX.Y.Z       -> :X.Y.Z, :X.Y, :X, :latest
+#   - tag vX.Y.Z-rc.N  -> :X.Y.Z-rc.N only (pre-releases never move :latest or :X)
+# `latest` is reserved for stable releases so that `docker pull` without a tag
+# matches what `npx -y @abelmferreira/mcp-mysql` installs (npm dist-tag latest).
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-docker-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+env:
+  IMAGE: docker.io/abelmferreira/mcp-mysql
+
+jobs:
+  test:
+    name: Test stage
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and run tests (target "test")
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: test
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  publish:
+    name: Build and push
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches package.json
+        if: github.ref_type == 'tag'
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          pkg_version="$(node -p 'require("./package.json").version')"
+          if [ "${REF_NAME#v}" != "$pkg_version" ]; then
+            echo "::error::Tag $REF_NAME does not match package.json version $pkg_version"
+            exit 1
+          fi
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: |
+            latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}},enable=${{ !startsWith(github.ref, 'refs/tags/v0.') }}
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
+            type=edge,branch=main
+            type=sha,enable=${{ github.ref_type != 'tag' }}
+          labels: |
+            org.opencontainers.image.title=mcp-mysql
+            org.opencontainers.image.description=MCP server for MySQL/MariaDB - query, monitor and analyze
+            org.opencontainers.image.licenses=MIT
+
+      - name: Build and push (multi-arch)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            REVISION=${{ github.sha }}
+            SOURCE=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
+
+      # Optional: sync the Docker Hub description with README.md.
+      # Requires DOCKERHUB_TOKEN to have "Read, Write, Delete" scope (a
+      # "Read & Write" token cannot update repository descriptions).
+      # Uncomment once the token has the right scope.
+      # - name: Update Docker Hub description
+      #   if: github.ref_type == 'tag' && !contains(github.ref_name, '-')
+      #   uses: peter-evans/dockerhub-description@v4
+      #   with:
+      #     username: ${{ secrets.DOCKERHUB_USERNAME }}
+      #     password: ${{ secrets.DOCKERHUB_TOKEN }}
+      #     repository: abelmferreira/mcp-mysql
+      #     short-description: MCP server for MySQL/MariaDB - query, monitor and analyze
+      #     readme-filepath: ./README.md

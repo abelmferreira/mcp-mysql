@@ -1,0 +1,37 @@
+# Keep the build context small and free of secrets.
+# Note: tests/ and vitest.config.ts are intentionally NOT ignored, because the
+# "test" stage needs them. The runtime stage never copies them.
+
+# VCS / CI / editor
+.git
+.gitignore
+.github
+.idea
+.vscode
+*.swp
+*.swo
+.DS_Store
+
+# Dependencies and build output (rebuilt inside the image)
+node_modules
+build
+dist
+coverage
+*.tgz
+
+# Environment files: real credentials must never enter the image
+.env
+.env.*
+!.env.example
+
+# Local tooling and docs not needed in the image
+.mcp.json
+.docs
+docs
+docker-compose*.yml
+Dockerfile*
+.dockerignore
+*.log
+tmp
+temp
+*.tmp

@@ -1,0 +1,113 @@
+name: Publish npm
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Run `npm publish --dry-run` (nothing is published)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-npm-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish to npm
+    needs: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write # npm Trusted Publishing (OIDC) and provenance
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      # Trusted Publishing needs npm >= 11.5.1. Pinned to the 11.x line, which
+      # supports the Node 22 runtime used here; bump deliberately.
+      - name: Update npm
+        run: npm install -g npm@11
+
+      - name: Resolve version
+        id: meta
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          pkg_version="$(node -p 'require("./package.json").version')"
+          if [ "$REF_TYPE" = "tag" ]; then
+            tag_version="${REF_NAME#v}"
+            if [ "$tag_version" != "$pkg_version" ]; then
+              echo "::error::Tag $REF_NAME does not match package.json version $pkg_version"
+              exit 1
+            fi
+          fi
+          case "$pkg_version" in
+            *-*) prerelease=true;  dist_tag=next ;;
+            *)   prerelease=false; dist_tag=latest ;;
+          esac
+          {
+            echo "version=$pkg_version"
+            echo "prerelease=$prerelease"
+            echo "dist-tag=$dist_tag"
+          } >> "$GITHUB_OUTPUT"
+          echo "Version $pkg_version -> npm dist-tag '$dist_tag'"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      # No token: authentication is npm Trusted Publishing (OIDC), configured on npmjs.com.
+      # `npm publish` runs "prepare" (build) again before packing.
+      - name: Publish
+        env:
+          DIST_TAG: ${{ steps.meta.outputs.dist-tag }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run }}
+        run: |
+          args=(--provenance --access public --tag "$DIST_TAG")
+          if [ "$DRY_RUN" = "true" ]; then
+            args+=(--dry-run)
+          fi
+          npm publish "${args[@]}"
+
+  release:
+    name: GitHub Release
+    needs: publish
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write # create the release
+    steps:
+      - name: Create release with generated notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          PRERELEASE: ${{ needs.publish.outputs.prerelease }}
+        run: |
+          args=(--repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes --verify-tag)
+          if [ "$PRERELEASE" = "true" ]; then
+            args+=(--prerelease)
+          fi
+          gh release create "$TAG" "${args[@]}"

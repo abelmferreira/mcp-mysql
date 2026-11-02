@@ -1,0 +1,77 @@
+{
+  "name": "@abelmferreira/mcp-mysql",
+  "version": "1.0.0",
+  "description": "MCP server for MySQL/MariaDB: query, monitor and analyze with read-only mode and SSH tunnel",
+  "keywords": [
+    "anthropic",
+    "claude",
+    "claude-code",
+    "database",
+    "mariadb",
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "mysql",
+    "read-only",
+    "sql",
+    "ssh-tunnel"
+  ],
+  "homepage": "https://github.com/abelmferreira/mcp-mysql#readme",
+  "bugs": {
+    "url": "https://github.com/abelmferreira/mcp-mysql/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/abelmferreira/mcp-mysql.git"
+  },
+  "license": "MIT",
+  "author": "Abel Ferreira (https://github.com/abelmferreira)",
+  "contributors": [
+    "fabriciofs (author of the original @fabriciofs/mcp-postgres, https://github.com/fabriciofs/mcp-postgres)"
+  ],
+  "type": "module",
+  "main": "build/index.js",
+  "bin": {
+    "mcp-mysql": "./build/index.js"
+  },
+  "files": [
+    "build",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepare": "npm run build",
+    "start": "node --env-file=.env build/index.js",
+    "start:prod": "node build/index.js",
+    "dev": "tsc --watch",
+    "clean": "rm -rf build",
+    "rebuild": "npm run clean && npm run build",
+    "inspector": "npx @modelcontextprotocol/inspector",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
+  },
+  "engines": {
+    "node": ">=20.12.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.1",
+    "mysql2": "^3.11.0",
+    "ssh2": "^1.17.0",
+    "zod": "^4.2.1"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.2",
+    "@types/ssh2": "^1.15.5",
+    "@vitest/coverage-v8": "^2.1.8",
+    "typescript": "^5.9.3",
+    "vitest": "^2.1.8"
+  }
+}

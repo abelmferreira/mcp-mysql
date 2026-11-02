@@ -1,0 +1,45 @@
+services:
+  # Local MySQL for development/testing of the MCP server.
+  mysql:
+    image: mysql:8.0
+    container_name: mcp-mysql-db
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpass}
+      MYSQL_DATABASE: ${SQL_DATABASE:-mydb}
+      MYSQL_USER: ${SQL_USER:-app}
+      MYSQL_PASSWORD: ${SQL_PASSWORD:-apppass}
+    ports:
+      # Bound to localhost only: this is a development database
+      - "127.0.0.1:${SQL_PORT:-3306}:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD:-rootpass}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    command: --performance-schema=ON
+
+  # The MCP server itself. It speaks MCP over stdio, so it is most useful when
+  # launched by an MCP client; here it is mainly for building/testing the image.
+  # Run an interactive session with:
+  #   docker compose run --rm mcp-mysql
+  # (no TTY: stdout carries the MCP protocol)
+  mcp-mysql:
+    build:
+      context: .
+    image: mcp-mysql:local
+    container_name: mcp-mysql-server
+    depends_on:
+      mysql:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      # Point the server at the compose MySQL service by default.
+      SQL_SERVER: ${SQL_SERVER:-mysql}
+      SQL_PORT: "3306"
+    stdin_open: true
+
+volumes:
+  mysql-data:
