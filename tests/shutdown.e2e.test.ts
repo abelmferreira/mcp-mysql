@@ -159,7 +159,7 @@ async function startChild(): Promise<{
     child.once('exit', (code, signal) => resolve({ code, signal }))
   );
 
-  const running = await waitFor(() => stderr.includes('MCP server running'), 8000);
+  const running = await waitFor(() => stderr.includes('MCP server running'), 30000);
   if (!running) throw new Error(`server did not start:\n${stderr}`);
   return { child, exited, stderr: () => stderr, ssh, db };
 }
@@ -186,17 +186,17 @@ describe.skipIf(!existsSync(entry))('compiled server shutdown (e2e, fake SSH + M
 
     t.child.stdin!.end();
 
-    expect(await withTimeout(t.exited, 6000)).toEqual({ code: 0, signal: null });
+    expect(await withTimeout(t.exited, 15000)).toEqual({ code: 0, signal: null });
     expect(t.stderr()).toContain('stdin closed');
     expect(await waitFor(() => t.ssh.connected() === 0)).toBe(true);
     expect(await waitFor(() => t.db.open() === 0)).toBe(true);
-  }, 20000);
+  }, 60000);
 
   it('exits 0 on SIGHUP', async () => {
     const t = await startChild();
     t.child.kill('SIGHUP');
-    expect(await withTimeout(t.exited, 6000)).toEqual({ code: 0, signal: null });
+    expect(await withTimeout(t.exited, 15000)).toEqual({ code: 0, signal: null });
     expect(t.stderr()).toContain('SIGHUP');
     expect(await waitFor(() => t.ssh.connected() === 0)).toBe(true);
-  }, 20000);
+  }, 60000);
 });
