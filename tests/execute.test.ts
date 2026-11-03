@@ -458,3 +458,42 @@ describe('graceful degradation (C6, C7)', () => {
     expect(sql).toContain('/ @@innodb_page_size >= 500');
   });
 });
+
+describe('column defaults (MariaDB quotes COLUMN_DEFAULT, MySQL does not)', () => {
+  const columns = (rows: Record<string, unknown>[]) => (sql: string) =>
+    /COLUMN_DEFAULT AS `defaultValue`/.test(sql) ? { rows } : undefined;
+
+  it.each([
+    ['schema_describe_table', () => tools.schemaDescribeTable({ table: 'users' })],
+    ['schema_list_columns', () => tools.schemaListColumns({ table: 'users' })],
+  ])('%s on MariaDB: "NULL" -> null, the rest as is', async (_name, run) => {
+    state.version = '10.11.6-MariaDB';
+    state.responder = columns([
+      { name: 'a', defaultValue: 'NULL' },
+      { name: 'b', defaultValue: "'shortname'" },
+      { name: 'c', defaultValue: "''" },
+      { name: 'd', defaultValue: 'current_timestamp()' },
+    ]);
+    const body = JSON.parse((await run()).content[0].text);
+    expect(body.columns.map((c: { defaultValue: unknown }) => c.defaultValue)).toEqual([
+      null,
+      "'shortname'",
+      "''",
+      'current_timestamp()',
+    ]);
+  });
+
+  it.each([
+    ['schema_describe_table', () => tools.schemaDescribeTable({ table: 'users' })],
+    ['schema_list_columns', () => tools.schemaListColumns({ table: 'users' })],
+  ])('%s on MySQL: values untouched (a "NULL" string default stays a string)', async (_name, run) => {
+    state.version = '8.0.36';
+    state.responder = columns([
+      { name: 'a', defaultValue: null },
+      { name: 'b', defaultValue: 'NULL' },
+      { name: 'c', defaultValue: 'shortname' },
+    ]);
+    const body = JSON.parse((await run()).content[0].text);
+    expect(body.columns.map((c: { defaultValue: unknown }) => c.defaultValue)).toEqual([null, 'NULL', 'shortname']);
+  });
+});

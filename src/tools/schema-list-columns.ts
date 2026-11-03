@@ -1,4 +1,5 @@
-import { executeQuery } from '../db/index.js';
+import { executeQuery, getServerInfo } from '../db/index.js';
+import { normalizeColumnDefaults } from './helpers.js';
 import { listColumnsSchema } from '../validators/schemas.js';
 import { formatSuccess, formatError } from '../utils/formatters.js';
 import type { ToolResponse } from '../types.js';
@@ -58,10 +59,11 @@ export async function schemaListColumns(args: unknown): Promise<ToolResponse> {
 
     query += ` ORDER BY c.TABLE_SCHEMA, c.TABLE_NAME, c.ORDINAL_POSITION`;
 
+    const serverInfo = await getServerInfo();
     const result = await executeQuery(query, params, 1000);
 
     return formatSuccess({
-      columns: result.rows,
+      columns: normalizeColumnDefaults(result.rows, serverInfo),
       count: result.rowCount,
     });
   } catch (error) {

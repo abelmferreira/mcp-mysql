@@ -71,13 +71,12 @@ export async function monitorConnections(): Promise<ToolResponse> {
       LIMIT 50
     `;
 
-    const [summary, byLogin, byHost, byDatabase, details] = await Promise.all([
-      executeQuery(summaryQuery, {}, 1),
-      executeQuery(byLoginQuery, {}, 50),
-      executeQuery(byHostQuery, {}, 50),
-      executeQuery(byDatabaseQuery, {}, 50),
-      executeQuery(detailsQuery, {}, 50),
-    ]);
+    // One after the other: each query needs its own connection (see POOL_MAX)
+    const summary = await executeQuery(summaryQuery, {}, 1);
+    const byLogin = await executeQuery(byLoginQuery, {}, 50);
+    const byHost = await executeQuery(byHostQuery, {}, 50);
+    const byDatabase = await executeQuery(byDatabaseQuery, {}, 50);
+    const details = await executeQuery(detailsQuery, {}, 50);
 
     return formatSuccess({
       summary: summary.rows[0],

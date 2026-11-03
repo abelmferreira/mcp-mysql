@@ -1,4 +1,5 @@
-import { executeQuery } from '../db/index.js';
+import { executeQuery, getServerInfo } from '../db/index.js';
+import { normalizeColumnDefaults } from './helpers.js';
 import { describeTableSchema } from '../validators/schemas.js';
 import { formatSuccess, formatError } from '../utils/formatters.js';
 import type { ToolResponse } from '../types.js';
@@ -86,18 +87,20 @@ export async function schemaDescribeTable(args: unknown): Promise<ToolResponse> 
 
     const params = { table, schema };
 
-    const [columns, pk, fk, indexes, stats] = await Promise.all([
-      executeQuery(columnsQuery, params, 500),
-      executeQuery(pkQuery, params, 50),
-      executeQuery(fkQuery, params, 100),
-      executeQuery(indexQuery, params, 100),
-      executeQuery(statsQuery, params, 1),
-    ]);
+    // One after the other: each query needs its own connection, and a burst of
+    // five could exceed a low max_user_connections; small metadata queries
+    // gain little from running in parallel.
+    const serverInfo = await getServerInfo();
+    const columns = await executeQuery(columnsQuery, params, 500);
+    const pk = await executeQuery(pkQuery, params, 50);
+    const fk = await executeQuery(fkQuery, params, 100);
+    const indexes = await executeQuery(indexQuery, params, 100);
+    const stats = await executeQuery(statsQuery, params, 1);
 
     return formatSuccess({
       schema,
       table,
-      columns: columns.rows,
+      columns: normalizeColumnDefaults(columns.rows, serverInfo),
       primaryKey: pk.rows.map((r) => (r as { column: string }).column),
       foreignKeys: fk.rows,
       indexes: indexes.rows,

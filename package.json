@@ -1,6 +1,6 @@
 {
   "name": "@abelmferreira/mcp-mysql",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "MCP server for MySQL/MariaDB: query, monitor and analyze with read-only mode and SSH tunnel",
   "keywords": [
     "anthropic",

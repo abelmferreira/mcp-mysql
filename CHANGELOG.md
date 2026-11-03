@@ -4,6 +4,33 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.2] - 2026-11-02
+
+### Fixed
+- Tools failed with `ER_USER_LIMIT_REACHED` (1226) on accounts with a low `max_user_connections`,
+  even with `POOL_MAX` below the limit. The mysql2 pool forgets a connection as soon as `end()` /
+  `destroy()` is called and opens the next one at once, while the server still counts the old
+  session. A FIFO of `POOL_MAX` slots now bounds the connections open on the server in every mode:
+  a slot is freed only when the server has closed the socket after `COM_QUIT`, or 500 ms after an
+  aborted connection (truncated result, timeout), which the client cannot observe.
+- Connections refused with 1226 `ER_USER_LIMIT_REACHED` or 1040 `ER_CON_COUNT_ERROR` (limits reached
+  by other clients) are retried 3 times (200/400/800 ms plus jitter, within `QUERY_TIMEOUT`), also at
+  startup; then the tool fails with a message that explains the limit and suggests lowering
+  `POOL_MAX` (no account name or address).
+- `schema_describe_table` and `schema_list_columns` returned `"defaultValue": "NULL"` on MariaDB
+  10.2.7+, whose `information_schema.COLUMNS.COLUMN_DEFAULT` holds the word `NULL` for no default;
+  it is now a JSON `null`, as on MySQL. MariaDB string defaults keep their quotes (`'abc'`), which
+  tells them apart from expressions such as `current_timestamp()`.
+- With `POOL_MAX=1` every tool works: no code holds a connection while waiting for another, and the
+  `KILL QUERY` after a client-side timeout is skipped (the server-side statement timeout ends the
+  statement) instead of waiting for a second connection.
+
+### Changed
+- `POOL_MAX` defaults to `3` (was `10`); raise it if the database account allows more connections.
+- `MAX_RESULT_BYTES` defaults to 1 MiB (`1048576`, was 10 MiB); range unchanged (`1024`..`104857600`).
+- `schema_describe_table`, `monitor_connections` and `monitor_database_size` run their queries one
+  after the other instead of all at once (one connection at a time, predictable order).
+
 ## [1.0.1] - 2026-11-02
 
 ### Fixed
@@ -59,4 +86,6 @@ First release, published as `@abelmferreira/mcp-mysql` (npm) and
   publishing (npm Trusted Publishing with provenance, multi-arch image on
   Docker Hub).
 
+[1.0.2]: https://github.com/abelmferreira/mcp-mysql/releases/tag/v1.0.2
+[1.0.1]: https://github.com/abelmferreira/mcp-mysql/releases/tag/v1.0.1
 [1.0.0]: https://github.com/abelmferreira/mcp-mysql/releases/tag/v1.0.0

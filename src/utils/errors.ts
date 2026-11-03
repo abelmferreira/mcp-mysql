@@ -105,6 +105,48 @@ export class UnsafeSessionError extends McpError {
   }
 }
 
+/** Server error numbers meaning "the server refused a new connection: limit reached" */
+export const CONNECTION_LIMIT_ERRNOS = new Set([
+  1226, // ER_USER_LIMIT_REACHED (max_user_connections of the account)
+  1040, // ER_CON_COUNT_ERROR (max_connections of the server)
+]);
+
+/**
+ * The server kept refusing new connections because a connection limit was
+ * reached, after a few retries. The message names the limit and how to live
+ * with it, without the account name or the server address.
+ */
+export class ConnectionLimitError extends McpError {
+  public readonly errno: number;
+  public readonly attempts: number;
+
+  constructor(errno: number, attempts: number, poolMax: number, limit?: number) {
+    const which =
+      errno === 1040
+        ? 'the database server reached its connection limit (MySQL error 1040 ER_CON_COUNT_ERROR, max_connections)'
+        : 'the database account reached its connection limit (MySQL error 1226 ER_USER_LIMIT_REACHED, ' +
+          `max_user_connections${limit !== undefined ? ` = ${limit}` : ''})`;
+    super(
+      `Could not open a database connection: ${which}; gave up after ${attempts} attempt(s). ` +
+        'The connections are in use by other clients (other sessions or applications using the same ' +
+        'account or server). Try again later, or lower POOL_MAX ' +
+        `(currently ${poolMax}) so that this MCP server needs fewer simultaneous connections.`,
+      'CONNECTION_LIMIT'
+    );
+    this.name = 'ConnectionLimitError';
+    this.errno = errno;
+    this.attempts = attempts;
+  }
+
+  /** Build from the driver error of the last attempt */
+  static from(error: unknown, attempts: number, poolMax: number): ConnectionLimitError {
+    const errno = getErrno(error) ?? 1226;
+    const driver = (error && typeof error === 'object' ? error : {}) as DriverError & { message?: string };
+    const match = /current value:\s*(\d+)/i.exec(String(driver.sqlMessage ?? driver.message ?? ''));
+    return new ConnectionLimitError(errno, attempts, poolMax, match ? Number(match[1]) : undefined);
+  }
+}
+
 /**
  * Shape of the errors raised by mysql2 for server errors
  */
@@ -161,6 +203,16 @@ export function isTimeoutError(error: unknown): boolean {
   if (errno !== undefined && TIMEOUT_ERRNOS.has(errno)) return true;
   const code = error && typeof error === 'object' ? (error as DriverError).code : undefined;
   return typeof code === 'string' && TIMEOUT_CODES.has(code);
+}
+
+/**
+ * Did the server refuse a new connection because a connection limit is reached?
+ * (A ConnectionLimitError has already been retried: false.)
+ */
+export function isConnectionLimitError(error: unknown): boolean {
+  if (error instanceof ConnectionLimitError) return false;
+  const errno = getErrno(error);
+  return errno !== undefined && CONNECTION_LIMIT_ERRNOS.has(errno);
 }
 
 /**

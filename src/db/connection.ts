@@ -2,8 +2,9 @@ import { readFileSync } from 'node:fs';
 import mysql, { type Pool, type PoolOptions } from 'mysql2/promise';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
-import { ConnectionError, getErrorMessage } from '../utils/errors.js';
+import { ConnectionError, ConnectionLimitError, getErrorMessage } from '../utils/errors.js';
 import { SshTunnel, loadPrivateKey } from './tunnel.js';
+import { connectWithRetry } from './connection-slots.js';
 
 /**
  * Singleton connection pool (and the SSH tunnel it goes through, when enabled)
@@ -47,6 +48,9 @@ function buildPoolOptions(host: string, port: number): PoolOptions {
     port,
     ssl: buildSslOptions(config.SSH !== null),
     waitForConnections: true,
+    // Second line of defence only: the real bound on the connections open on
+    // the server is the FIFO of db/connection-slots.ts (the pool forgets a
+    // connection before the server has closed it)
     connectionLimit: config.POOL_MAX,
     queueLimit: 0,
     connectTimeout: config.QUERY_TIMEOUT,
@@ -84,6 +88,7 @@ async function resolveEndpoint(): Promise<{ host: string; port: number }> {
 }
 
 async function createPool(): Promise<Pool> {
+  let created: Pool | null = null;
   try {
     logger.info('Connecting to MySQL', {
       server: config.SQL_SERVER,
@@ -93,10 +98,12 @@ async function createPool(): Promise<Pool> {
     });
 
     const endpoint = await resolveEndpoint();
-    const created = mysql.createPool(buildPoolOptions(endpoint.host, endpoint.port));
+    created = mysql.createPool(buildPoolOptions(endpoint.host, endpoint.port));
+    const validating = created;
 
-    // Validate the connection works
-    const conn = await created.getConnection();
+    // Validate the connection works (it then stays in the pool, idle, and is
+    // the first one handed out). A "too many connections" refusal is retried.
+    const conn = await connectWithRetry(() => validating.getConnection(), Date.now() + config.QUERY_TIMEOUT);
     try {
       await conn.query('SELECT 1');
     } finally {
@@ -113,13 +120,19 @@ async function createPool(): Promise<Pool> {
     pool = created;
     return created;
   } catch (error) {
-    // Do not leave a half-open tunnel behind; the next call starts from scratch
+    // Do not leave a half-open pool or tunnel behind; the next call starts from scratch
+    if (created) {
+      await created.end().catch(() => undefined);
+    }
     if (tunnel) {
       await tunnel.close().catch(() => undefined);
       tunnel = null;
     }
     const message = getErrorMessage(error);
     logger.error('Failed to connect to MySQL', { error: message });
+    if (error instanceof ConnectionLimitError) {
+      throw error;
+    }
     throw new ConnectionError(`Failed to connect to MySQL: ${message}`);
   }
 }

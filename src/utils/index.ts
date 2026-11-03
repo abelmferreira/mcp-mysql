@@ -8,10 +8,12 @@ export {
   MissingParameterError,
   InvalidOperationError,
   UnsafeSessionError,
+  ConnectionLimitError,
   getErrorMessage,
   getErrno,
   isTimeoutError,
   isOptionalFeatureError,
+  isConnectionLimitError,
   redactSensitive,
 } from './errors.js';
 export {

@@ -174,8 +174,8 @@ Notes for Docker:
 | `READONLY` | **yes** | - | `true` (read-only, recommended) or `false` (enables write tools) |
 | `QUERY_TIMEOUT` | no | `30000` | Statement timeout in ms (max `120000`), enforced by the server and by the client |
 | `MAX_ROWS` | no | `1000` | Max rows returned per query (max `5000`); caps the `maxRows` argument of the tools |
-| `MAX_RESULT_BYTES` | no | `10485760` | Max size of one query result (approximate, in bytes; `1024`..`104857600`). Larger results are cut and flagged `truncated` |
-| `POOL_MAX` | no | `10` | Maximum simultaneous database connections (max `50`). `POOL_MIN` is no longer used and is ignored |
+| `MAX_RESULT_BYTES` | no | `1048576` (1 MiB) | Max size of one query result (approximate, in bytes; `1024`..`104857600`). Larger results are cut and flagged `truncated` |
+| `POOL_MAX` | no | `3` | Maximum connections open on the database at the same time (`1`..`50`); further queries wait in a FIFO queue. Keep it below the account's `max_user_connections` (leave room for its other clients); raise it if the account allows more. `POOL_MIN` is no longer used and is ignored |
 | `LOG_LEVEL` | no | `info` | `debug`, `info`, `warn`, `error` (logs go to stderr) |
 | `SSH_HOST` | no | - | Enables the built-in SSH tunnel |
 | `SSH_PORT` | no | `22` | SSH port |
@@ -225,10 +225,16 @@ Statement-only keywords that are not reserved (`HANDLER`, `RESET`, `FLUSH`, `KIL
 With `READONLY=true` each query runs on its own connection:
 
 - the session `sql_mode` is checked first. `NO_BACKSLASH_ESCAPES` and `ANSI_QUOTES` (and the combination modes that imply it: `ANSI`, `ORACLE`, `DB2`, `MSSQL`, `POSTGRESQL`, `MAXDB`) change how string literals are read, which the validator and the parameter escaping rely on: they are removed from the session `sql_mode` (no privilege needed); if that does not stick, the query is refused;
-- a server-side statement timeout is set (`max_statement_time` on MariaDB, `max_execution_time` on MySQL). If neither can be set, the query is refused. A client-side timer (`QUERY_TIMEOUT` + 1 s) also aborts the query, with a `KILL QUERY` on another connection (an account can always kill its own threads);
+- a server-side statement timeout is set (`max_statement_time` on MariaDB, `max_execution_time` on MySQL). If neither can be set, the query is refused. A client-side timer (`QUERY_TIMEOUT` + 1 s) also aborts the query, with a `KILL QUERY` on another connection (an account can always kill its own threads; skipped with `POOL_MAX=1`, where the server-side timeout ends the statement);
 - the statement runs inside `START TRANSACTION READ ONLY`, so even a `SELECT f()` where `f` writes is refused by the database;
 - rows are streamed and reading stops at `maxRows` (capped by `MAX_ROWS`) or `MAX_RESULT_BYTES`; the connection is then dropped, so a huge result never fills the memory of the process;
 - the connection is closed afterwards and never reused, so no session state survives a query (user-level locks, user variables, `LAST_INSERT_ID(x)`, temporary tables). This costs one new connection per query (through the SSH tunnel: a new forwarded channel on the same SSH session).
+
+### Connection limits
+
+The server never has more than `POOL_MAX` connections open from this process, in both modes: further queries wait in a FIFO queue. A slot is freed only when the server has really dropped the connection (the socket closed after `COM_QUIT`; after an aborted result or a timeout, 500 ms later, since the client cannot observe it), so a closing connection and its replacement are never counted together against `max_user_connections`. With `POOL_MAX=1` every tool still works (the tools run their queries one after the other).
+
+When the server still refuses a connection because a limit is reached by other clients (`1226 ER_USER_LIMIT_REACHED` for the account's `max_user_connections`, `1040 ER_CON_COUNT_ERROR` for the server's `max_connections`), the connection is retried 3 times (200/400/800 ms plus jitter, within `QUERY_TIMEOUT`); then the tool fails with a message that explains the limit and suggests lowering `POOL_MAX`.
 
 ### TLS
 
@@ -242,7 +248,7 @@ The SSH host key is always verified against `SSH_HOST_FINGERPRINT` (format check
 
 - The validator is a blocklist on top of an allowlist of statement types: it cannot know UDFs or stored functions, and it is not a substitute for the GRANT.
 - MySQL's `max_execution_time` only applies to `SELECT`; `SHOW`/`EXPLAIN` are bounded by the client-side timer.
-- `MAX_RESULT_BYTES` is approximate, and a single row can still be as large as the server's `max_allowed_packet`.
+- `MAX_RESULT_BYTES` (1 MiB by default) is approximate, and a single row can still be as large as the server's `max_allowed_packet`.
 - Keep `READONLY=true` unless you really need the write tools: with `READONLY=false` none of the checks above applies to `sql_execute` (only the `sql_mode` check, which keeps parameter escaping correct).
 
 ## Available tools

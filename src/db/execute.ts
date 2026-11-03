@@ -2,12 +2,14 @@ import { createHash } from 'node:crypto';
 import type { EventEmitter } from 'node:events';
 import type { FieldPacket, ResultSetHeader } from 'mysql2/promise';
 import { getPool } from './connection.js';
+import { connectWithRetry, getConnectionSlots, type Slot } from './connection-slots.js';
 import { prepareSession, type SessionConnection } from './session.js';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
 import { lex } from '../validators/sql-lexer.js';
 import { validateQuery } from '../validators/query-validator.js';
 import {
+  ConnectionError,
   QueryValidationError,
   ReadOnlyViolationError,
   TimeoutError,
@@ -171,7 +173,7 @@ interface CoreConnection {
  * Promise connection taken from the pool (mysql2/promise PoolConnection)
  */
 interface PooledConnection extends SessionConnection {
-  connection: CoreConnection & { stream?: { destroy(): void } };
+  connection: CoreConnection & { stream?: SocketLike };
   threadId: number | null;
   release(): void;
   destroy(): void;
@@ -257,9 +259,27 @@ function streamQuery(core: CoreConnection, sql: string, limits: StreamLimits): P
 /**
  * Best effort KILL QUERY of a server thread, on another pooled connection.
  * Users can always kill their own threads (no PROCESS/SUPER needed).
+ *
+ * The caller still holds the slot of the timed out connection (the server has
+ * not dropped it yet), so the KILL needs a second slot. It waits for one at
+ * most KILL_TIMEOUT_MS and is skipped when POOL_MAX is 1 (no second slot can
+ * ever come): the server-side statement timeout set by prepareSession() ends
+ * the statement anyway.
  */
 async function killQuery(pool: PoolLike, threadId: number | null): Promise<void> {
   if (typeof threadId !== 'number' || !Number.isInteger(threadId) || threadId <= 0) return;
+  const slots = getConnectionSlots();
+  if (slots.max < 2) {
+    logger.warn('POOL_MAX=1: no spare connection to KILL the timed out query; the server-side statement timeout ends it', {
+      threadId,
+    });
+    return;
+  }
+  const slot = await slots.acquire(KILL_TIMEOUT_MS);
+  if (!slot) {
+    logger.warn('No free connection to KILL the timed out query; the server-side statement timeout ends it', { threadId });
+    return;
+  }
   let timer: NodeJS.Timeout | undefined;
   try {
     await Promise.race([
@@ -272,6 +292,9 @@ async function killQuery(pool: PoolLike, threadId: number | null): Promise<void>
     logger.warn('Could not kill the timed out query', { threadId, error: getErrorMessage(error) });
   } finally {
     clearTimeout(timer);
+    // pool.query() gave its connection back to the pool (idle, counted by the
+    // pool); the next getConnection() reuses it
+    slot.release();
   }
 }
 
@@ -284,19 +307,120 @@ async function killQuery(pool: PoolLike, threadId: number | null): Promise<void>
  */
 type Disposal = 'release' | 'quit' | 'abort';
 
-function dispose(conn: PooledConnection, disposal: Disposal): void {
-  if (disposal === 'release') {
-    conn.release();
+/**
+ * Hold the slot of an aborted connection this long before reusing it.
+ *
+ * After a socket is destroyed the client has no way to learn when the server
+ * drops the session: the server only notices on its next read/write (at once
+ * when it is streaming rows, i.e. a truncated result; right after KILL QUERY
+ * or its own statement timeout for a timed out query). Until then the session
+ * still counts against max_user_connections. Half a second covers that on any
+ * sane link; the connection-limit retry (connectWithRetry) covers the rest.
+ */
+export const ABORT_RELEASE_DELAY_MS = 500;
+
+/**
+ * Longest wait for the server to close the socket after COM_QUIT. Past this
+ * the socket is destroyed and the slot is handled like an aborted one.
+ */
+export const QUIT_CLOSE_TIMEOUT_MS = 2000;
+
+/** Socket of a connection, as far as the slot accounting needs it */
+interface SocketLike {
+  destroy(): void;
+  once?(event: 'close', listener: () => void): unknown;
+  removeListener?(event: 'close', listener: () => void): unknown;
+  closed?: boolean;
+}
+
+function releaseLater(slot: Slot, delayMs: number): void {
+  const timer = setTimeout(() => slot.release(), delayMs);
+  timer.unref?.();
+}
+
+/**
+ * Release the slot once the server has closed the socket after COM_QUIT.
+ *
+ * mysql2 resolves conn.end() as soon as COM_QUIT is written and removes the
+ * connection from the pool at that very moment, so the pool would happily
+ * open a new connection while the server still counts the old one. The
+ * server closes the socket only after it has ended the session (MySQL and
+ * MariaDB release the per-account connection count before closing the
+ * socket), so 'close' on our side is the confirmation we wait for.
+ */
+function releaseOnClose(stream: SocketLike | undefined, slot: Slot): void {
+  if (!stream || typeof stream.once !== 'function' || stream.closed === true) {
+    slot.release();
     return;
   }
-  if (disposal === 'quit') {
-    conn.end().catch(() => conn.destroy());
-    return;
-  }
+  const onClose = () => {
+    clearTimeout(timer);
+    slot.release();
+  };
+  const timer = setTimeout(() => {
+    stream.removeListener?.('close', onClose);
+    stream.destroy();
+    releaseLater(slot, ABORT_RELEASE_DELAY_MS);
+  }, QUIT_CLOSE_TIMEOUT_MS);
+  timer.unref?.();
+  stream.once('close', onClose);
+}
+
+/** Drop the socket at once (truncated result, timeout) */
+function abortConnection(conn: PooledConnection): void {
   conn.destroy();
   // destroy() only half-closes the socket; drop it so that the rest of the
   // result set is not read (the server then aborts the statement on write)
   conn.connection.stream?.destroy();
+}
+
+/**
+ * Give a connection back and free its slot when the server no longer counts it.
+ * For 'abort' the caller may first KILL the statement, then calls
+ * releaseLater() itself.
+ */
+function dispose(conn: PooledConnection, disposal: Exclude<Disposal, 'abort'>, slot: Slot): void {
+  if (disposal === 'release') {
+    // Back to the pool, idle but still open: the pool counts it and hands it
+    // out again before opening a new one, so the slot can go now
+    conn.release();
+    slot.release();
+    return;
+  }
+  releaseOnClose(conn.connection.stream, slot);
+  conn.end().catch(() => conn.destroy());
+}
+
+/**
+ * Wait for a connection slot, then open (or reuse) a pooled connection,
+ * retrying when the server refuses it for a connection limit.
+ * On failure the slot is released and the error rethrown.
+ */
+async function openConnection(): Promise<{ pool: PoolLike; conn: PooledConnection; slot: Slot }> {
+  const slots = getConnectionSlots();
+  const waitMs = slotWaitTimeoutMs();
+  const slot = await slots.acquire(waitMs);
+  if (!slot) {
+    throw new ConnectionError(
+      `Timed out after ${waitMs}ms waiting for a free database connection: all ${slots.max} (POOL_MAX) are busy`
+    );
+  }
+  try {
+    const pool = (await getPool()) as unknown as PoolLike;
+    const conn = await connectWithRetry(() => pool.getConnection(), Date.now() + config.QUERY_TIMEOUT);
+    return { pool, conn, slot };
+  } catch (error) {
+    slot.release();
+    throw error;
+  }
+}
+
+/**
+ * Longest wait in the connection queue: enough for the busy connections to
+ * finish a full QUERY_TIMEOUT (plus the KILL and the close), not forever.
+ */
+function slotWaitTimeoutMs(): number {
+  return 2 * config.QUERY_TIMEOUT + CLIENT_TIMEOUT_GRACE_MS + KILL_TIMEOUT_MS + ABORT_RELEASE_DELAY_MS;
 }
 
 /**
@@ -310,8 +434,7 @@ function dispose(conn: PooledConnection, disposal: Disposal): void {
  * query (through the SSH tunnel: one new forwarded channel, same SSH session).
  */
 async function runStatement(sql: string, maxRows: number, readonly: boolean): Promise<StreamOutcome> {
-  const pool = (await getPool()) as unknown as PoolLike;
-  const conn = await pool.getConnection();
+  const { pool, conn, slot } = await openConnection();
   let disposal: Disposal = readonly ? 'quit' : 'release';
   let killThread: number | null = null;
 
@@ -340,9 +463,15 @@ async function runStatement(sql: string, maxRows: number, readonly: boolean): Pr
     }
     throw error;
   } finally {
-    dispose(conn, disposal);
-    if (killThread !== null) {
-      await killQuery(pool, killThread);
+    if (disposal === 'abort') {
+      abortConnection(conn);
+      if (killThread !== null) {
+        // Still holding the slot: the killed session is alive on the server
+        await killQuery(pool, killThread);
+      }
+      releaseLater(slot, ABORT_RELEASE_DELAY_MS);
+    } else {
+      dispose(conn, disposal, slot);
     }
   }
 }
@@ -444,17 +573,16 @@ export async function executeWrite(
   const sql = compileQuery(query, params);
 
   try {
-    const pool = (await getPool()) as unknown as PoolLike;
-    const conn = await pool.getConnection();
+    const { conn, slot } = await openConnection();
     let result: unknown;
     try {
       await prepareSession(conn, { readonly: false, timeoutMs: config.QUERY_TIMEOUT });
       [result] = await conn.query(sql);
     } catch (error) {
-      dispose(conn, 'quit');
+      dispose(conn, 'quit', slot);
       throw error;
     }
-    dispose(conn, 'release');
+    dispose(conn, 'release', slot);
 
     const duration = Date.now() - startTime;
     const header = result as ResultSetHeader;

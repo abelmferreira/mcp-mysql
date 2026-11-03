@@ -143,18 +143,22 @@ const envSchema = z.object({
     .transform((val) => parseInt(val, 10))
     .pipe(z.number().int().positive().max(5000)),
 
-  // Upper bound of the response size of a single query (sum of the row values)
+  // Upper bound of the response size of a single query (sum of the row values):
+  // 1 MiB by default, 1 KiB..100 MiB
   MAX_RESULT_BYTES: z
     .string()
-    .default('10485760')
+    .default('1048576')
     .transform((val) => parseInt(val, 10))
     .pipe(z.number().int().min(1024).max(104857600)),
 
+  // Maximum connections open on the server at the same time (1..50). Every
+  // query beyond it waits in a FIFO queue. The default (3) fits accounts with
+  // a low max_user_connections; raise it if the account allows more.
   // POOL_MIN is no longer used (mysql2 has no minimum pool size); it is
   // accepted and ignored so existing configurations keep working.
   POOL_MAX: z
     .string()
-    .default('10')
+    .default('3')
     .transform((val) => parseInt(val, 10))
     .pipe(z.number().int().positive().max(50)),
 

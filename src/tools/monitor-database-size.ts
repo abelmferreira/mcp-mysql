@@ -48,11 +48,10 @@ export async function monitorDatabaseSize(): Promise<ToolResponse> {
       LIMIT 20
     `;
 
-    const [size, databases, tables] = await Promise.all([
-      executeQuery(sizeQuery, {}, 1),
-      executeQuery(databasesQuery, {}, 100),
-      executeQuery(tablesQuery, {}, 20),
-    ]);
+    // One after the other: each query needs its own connection (see POOL_MAX)
+    const size = await executeQuery(sizeQuery, {}, 1);
+    const databases = await executeQuery(databasesQuery, {}, 100);
+    const tables = await executeQuery(tablesQuery, {}, 20);
 
     return formatSuccess({
       summary: size.rows[0],
